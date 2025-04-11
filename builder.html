@@ -1,0 +1,491 @@
+<html>
+    <head>
+        <style>
+            canvas {
+                border: 2px solid black;
+                transform: translate(-50%, -50%);
+                top: 50%;
+                left: 50%;
+                position: absolute;
+            }
+
+            .row {
+                display: flex;
+                align-items: center;
+                gap: 10px;
+                margin-bottom: 10px;
+                justify-content: center;
+            }
+
+            .input {
+                padding: 5px;
+                font-size: 20px;
+                border-radius: 6px;
+            }
+
+            label {
+                font-family: Arial;
+                font-size: 20px;
+                font-weight: 500;
+            }
+            button, .load-btn {
+                border: 2px solid black;
+                border-radius: 5px;
+                padding: 5px 20px;
+                font-size: 14px;
+                background-color: #eee;
+                cursor: pointer;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="row">
+            <label>Audio File</label>
+            <input type="file" class="input" accept="audio/*" id="songInput"/>
+        </div>
+        <div class="row">
+            <label>Chart Name</label>
+            <input type="text" class="input" id="filenameInput"/>    
+        </div>
+        <div class="row">
+            <label>BPM</label>
+            <input type="number" id="bpmInput" value="120" class="input" style="width: 65px"/>
+            
+            <label>Offset</label>
+            <input type="range" id="initOffsetInput" value="0" min="-1" max="1" step="any"/>
+
+            <label>Beat Distance</label>
+            <input type="range" id="beatDistInput" value="250" min="150" max="500" step="any"/>
+        </div>
+        
+        <div class="row">
+            <button id="playBtn" disabled>Play</button>
+            <button id="pauseBtn">Pause</button>
+            <button id="saveBtn">Save</button>
+            <label for="loadInput" class="load-btn">Load</label>
+            <input id="loadInput" style="display: none;" type="file" accepts=".fruit"/>
+        </div>
+
+        <div class="row">
+            <label id="stateText"></label>
+        </div>
+        
+        <canvas width="490px" height="800px" id="gameCanvas"></canvas>
+        <script>
+            let song, songBlob;
+
+            const playBtn = document.getElementById('playBtn');
+            const pauseBtn = document.getElementById('pauseBtn');
+            const saveBtn = document.getElementById('saveBtn');
+            const loadInput = document.getElementById('loadInput');
+
+            const initOffsetInput = document.getElementById('initOffsetInput');
+            const bpmInput = document.getElementById('bpmInput');
+            const filenameInput = document.getElementById('filenameInput');
+            const beatDistInput = document.getElementById('beatDistInput');
+            const songInput = document.getElementById('songInput');
+
+            const stateText = document.getElementById('stateText');
+
+            const canvas = document.getElementById('gameCanvas');
+            const ctx = canvas.getContext('2d');
+
+            const PROGRESS_SIZE = 10;
+            const BAR_X = 20;
+            const BAR_WIDTH = 8;
+            
+            const ARROW_SIZE = (canvas.width - 100) / 4 - 20;
+            const GOAL_LINE = canvas.height - ARROW_SIZE * 2;
+            const PLAY_SPEED = 60;
+
+            let BEAT_DISTANCE = 250;
+            let bpm = 120;
+            let initOffset = 0;
+            let chartName = '';
+            let songDistance = 0;
+
+
+            let notes = [];
+            let beatLines = [];
+
+            let builtLines = false;
+
+            let arrowAssets = [
+                'arrow-l-pass-1.png',
+                'arrow-u-pass-1.png',
+                'arrow-d-pass-1.png',
+                'arrow-r-pass-1.png'
+            ];
+            const arrowImgs = [];
+
+            let dragging = false, wasPlaying = false;
+            let canPlay = false, canPlace = false;
+            let placing = false, erasing = false, sustaining = false;
+
+            let closestNote = -1, closestBeat;
+
+            initOffsetInput.addEventListener('input', e => {
+                initOffset = Number(e.target.value);
+                buildLines();
+            });
+
+            bpmInput.addEventListener('input', e => {
+                bpm = Number(e.target.value);
+                buildLines();
+            });
+
+            filenameInput.addEventListener('input', e => {
+                chartName = e.target.value;
+            });
+
+            beatDistInput.addEventListener('input', e => {
+                BEAT_DISTANCE = Number(e.target.value);
+                buildLines();
+            });
+
+            songInput.addEventListener('input', e => {
+                const reader = new FileReader();
+                reader.addEventListener('load', () => {
+                    songBlob = reader.result;
+                });
+                reader.readAsDataURL(e.target.files[0]);
+                
+                const urlObj = URL.createObjectURL(e.target.files[0]);
+                song = new Audio(urlObj);
+                song.addEventListener('load', () => { 
+                    URL.revokeObjectURL(urlObj)
+                });
+                song.addEventListener('canplaythrough', e => {
+                    canPlay = true;
+                    playBtn.disabled = false;
+    
+                    buildLines();
+                });
+            });
+
+            for(let arrowAsset of arrowAssets) {
+                let arrowImg = new Image();
+                arrowImg.src = arrowAsset;
+                arrowImgs.push(arrowImg);
+            }
+
+            function drawGoal() {
+                ctx.globalAlpha = 0.5;
+                for(let i = 0; i < arrowImgs.length; i++) {
+                    ctx.drawImage(arrowImgs[i], 100 + (canvas.width - 100) / 4 * i + (canvas.width - 100) / 8 - ARROW_SIZE / 2, GOAL_LINE - ARROW_SIZE / 2, ARROW_SIZE, ARROW_SIZE);
+                }
+                ctx.globalAlpha = 1;
+            }
+
+            function removeDuplicates() {
+                for(let i = notes.length - 1; i >= 0; i--) {
+                    for(let j = i - 1; j >= 0; j--) {
+                        if(notes[j].dir === notes[i].dir && notes[i].beat === notes[j].beat) {
+                            notes.splice(j, 1);
+                            i--;
+                        }
+                    }
+                }
+
+                for(let i = 0; i < notes.length; i++) {
+                    notes[i].ind = i;
+                }
+            }
+            
+
+            function buildLines() {
+                const beatLength = 60 / bpm;
+
+                beatLines = [];
+                
+                let beatPtr = 0;
+                for(let i = initOffset; i < song.duration; i += beatLength) {
+                    beatLines.push(new BeatLine((initOffset + beatPtr) * BEAT_DISTANCE));
+                    beatPtr++;
+                }
+
+                songDistance = (initOffset + beatLines.length) * BEAT_DISTANCE;
+                builtLines = true;
+            }
+
+            playBtn.addEventListener('click', e => {
+                song.play();
+            });
+
+            pauseBtn.addEventListener('click', e => {
+                song.pause();
+            });
+
+            saveBtn.addEventListener('click', e => {
+
+                const fileBody = {
+                    chartName: chartName,
+                    bpm: bpm,
+                    initOffset: initOffset,
+                    audioFile: songBlob,
+                    beatDistance: BEAT_DISTANCE,
+                    notes: notes
+                };
+
+                const a = document.createElement("a");
+                a.href = URL.createObjectURL(new Blob([JSON.stringify(fileBody)], {
+                    type: "text/plain"
+                }));
+                a.setAttribute("download", chartName + ".fruit");
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+            });
+
+            loadInput.addEventListener('input', e => {
+                const reader = new FileReader();
+                reader.addEventListener('load', () => {
+                    const chartData = JSON.parse(reader.result);
+                    chartName = chartData.chartName;
+                    filenameInput.value = chartName;
+                    bpm = chartData.bpm;
+                    bpmInput.value = bpm;
+                    BEAT_DISTANCE = chartData.beatDistance;
+                    beatDistInput.value = BEAT_DISTANCE;
+                    initOffset = chartData.initOffset;
+                    initOffsetInput.value = initOffset;
+                    
+
+                    song = new Audio(chartData.audioFile);
+                    songBlob = chartData.audioFile;
+                    song.addEventListener('canplaythrough', e => {
+                        notes = [];
+                        for(let n of chartData.notes) {
+                            notes.push(new Note(n.dir, n.beat, n.sustainEnd, notes.length));
+                        }
+                        removeDuplicates();
+                        canPlay = true;
+                        playBtn.disabled = false;
+        
+                        buildLines();
+                    });
+
+                    buildLines();
+                });
+                reader.readAsText(e.target.files[0]);
+            });
+
+            function BeatLine(offset) {
+                this.offset = offset;
+
+                this.draw = function(dt) {
+                    const yPos = (GOAL_LINE - this.offset) + ((1 - p.progress) * songDistance);
+
+                    if(yPos > 0 && yPos < canvas.height + BEAT_DISTANCE) {
+                        ctx.beginPath(); 
+                        ctx.roundRect(100, yPos - 3, 390, 6, [3]);
+                        ctx.fill();
+
+                        ctx.fillRect(100, yPos - BEAT_DISTANCE / 4 - 1, 390, 2);
+                        
+                        ctx.fillRect(100, yPos - BEAT_DISTANCE / 2 - 1, 390, 2);
+                        
+                        ctx.fillRect(100, yPos - (3 * BEAT_DISTANCE / 4) - 1, 390, 2);
+                    }
+                };1
+            }
+
+            function Note(dir, beat, sustainEnd, ind) {
+                this.beat = beat;
+                this.dir = dir;
+                this.sustainEnd = sustainEnd;
+                this.ind = ind;
+
+                this.draw = function() {
+                    let xPos = 100 + (canvas.width - 100) / 4 * this.dir + (canvas.width - 100) / 8 - ARROW_SIZE / 2;
+                    let yPos = GOAL_LINE - (initOffset + this.beat) * BEAT_DISTANCE + ((1 - p.progress) * songDistance) - ARROW_SIZE / 2;
+                    
+                    if(this.sustainEnd != this.beat && yPos - (this.sustainEnd - this.beat) * BEAT_DISTANCE < canvas.height + ARROW_SIZE && yPos > -ARROW_SIZE) {
+                        ctx.beginPath();
+                        ctx.roundRect(xPos - 10 + ARROW_SIZE / 2, yPos - (this.sustainEnd - this.beat) * BEAT_DISTANCE + ARROW_SIZE / 2, 20, (this.sustainEnd - this.beat) * BEAT_DISTANCE, [10]);
+                        ctx.fill();
+                    }
+
+                    if(yPos > -ARROW_SIZE && yPos < canvas.height + ARROW_SIZE) {
+                        ctx.drawImage(arrowImgs[dir],  xPos, yPos, ARROW_SIZE, ARROW_SIZE);
+                    }
+                }
+            }
+
+            function ProgressBar() {
+                this.draw = function() {
+
+                    if(song && !song.paused) 
+                        this.progress = 1 - (song.currentTime / song.duration);
+
+                    // full bar
+                    ctx.beginPath();
+                    ctx.roundRect(BAR_X, 50, BAR_WIDTH, 700, [16]);
+                    ctx.fill();
+
+                    // progress
+                    ctx.beginPath();
+                    ctx.arc(BAR_X + (BAR_WIDTH / 2), 50 + this.progress * 700, PROGRESS_SIZE, 0, 2 * Math.PI);
+                    ctx.fill();
+                };
+            }
+
+            canvas.addEventListener('mousedown', e => {
+                if(!song) return;
+                    
+                wasPlaying = !song.paused;
+                if (Math.abs(e.offsetX - BAR_X) < PROGRESS_SIZE && Math.abs(e.offsetY - (p.progress * 700 + 50)) < PROGRESS_SIZE) {
+                    dragging = true;
+                }
+
+                if(placing && canPlace) {
+                    if(notes.filter(n => n.dir === closestNote && n.beat === closestBeat).length === 0) {
+                        notes.push(new Note(closestNote, closestBeat));
+                    }
+                }
+
+                if(erasing && canPlace) {
+                    for(let i = notes.length - 1; i >= 0; i--) {
+                        if(notes[i].dir === closestNote && notes[i].beat === closestBeat) {
+                            notes.splice(i, 1);
+                        }
+                    }
+                }
+
+                if(sustaining && canPlace) {
+                    // get closest note before sustain end point
+                    let relevantNotes = notes.filter(n => n.dir === closestNote && n.beat <= closestBeat);
+                    let maxBeat = 0;
+
+                    if(relevantNotes.length > 0) {
+                        // no guarantee that notes are sorted, find closest
+                        let note;
+                        for(let n of relevantNotes) {
+                            if(n.beat > maxBeat) {
+                                note = n;
+                                maxBeat = n.beat;
+                            }
+                        }
+
+                        note.sustainEnd = closestBeat;
+                    }
+                }
+            });
+          
+            canvas.addEventListener('mousemove', e => {
+                if(dragging) {
+                    song.pause();
+                    p.progress = (e.offsetY - 50) / 700;
+                    if(p.progress > 1) p.progress = 1;
+                    if(p.progress < 0) p.progress = 0;
+                }
+
+                if(placing || erasing || sustaining) {
+                    canPlace = true;
+                    // ignore if in menu
+                    if(e.offsetX < 100) {
+                        canPlace = false;
+                    }
+
+                    // determine closest note on x axis
+                    closestNote = Math.round((e.offsetX - 50) / (canvas.width - 100) * 4) - 1;
+                    if(closestNote > 3) {
+                        closestNote = 3;
+                    }
+
+                    // determine closest beat on y axis
+                    closestBeat = -1 * ((e.offsetY - GOAL_LINE) / BEAT_DISTANCE + initOffset) + ((1 - p.progress) * songDistance) / BEAT_DISTANCE;
+                    closestBeat = Math.round(closestBeat * 4) / 4;
+                    if(closestBeat < 0) {
+                        canPlace = false;
+                    }               
+                }
+            });
+
+            window.addEventListener('mouseup', e => {
+                if(dragging) {
+                    dragging = false;
+                    if(wasPlaying) song.play();
+                    song.currentTime = song.duration * (1 - p.progress);
+                }
+                
+            });
+
+            canvas.addEventListener('wheel', e => {
+                if(song.paused) {
+                    p.progress += e.deltaY / 1000000;
+
+                    if(p.progress > 1) p.progress = 1;
+                    if(p.progress < 0) p.progress = 0;
+                    
+                    song.currentTime = song.duration * (1 - p.progress);
+                }
+            });
+
+            window.addEventListener('keydown', e => {
+                if(e.code === 'Digit1') {
+                    placing = true;
+                    erasing = false;
+                    sustaining = false;
+                    stateText.innerHTML = 'Placing';
+                }
+
+                if(e.code === 'Digit2') {
+                    placing = false;
+                    erasing = true;
+                    sustaining = false;
+                    3
+                    stateText.innerHTML = 'Erasing';
+                }
+
+                if(e.code === 'Digit3') {
+                    erasing = false;
+                    placing = false;
+                    sustaining = true;
+                    stateText.innerHTML = 'Sustaining';
+                }
+
+                if(e.code === 'Space') {
+                    if(canPlay && song.paused) {
+                        song.play();
+                    } else {
+                        song.pause();
+                    }
+                }
+            });
+
+            const p = new ProgressBar();
+            p.progress = 1;
+
+            let prevTime = 0;
+            function gameLoop(time) {
+                let dt = time - prevTime;
+                prevTime = time;
+
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+                
+                drawGoal();
+                p.draw(dt);
+
+                for(let b of beatLines) {
+                    b.draw();
+                }
+
+                for(let n of notes) {
+                    n.draw();
+                }
+
+                if(song && placing && closestNote !== -1 && canPlace && song.paused) {
+                    const noteX = 100 + (canvas.width - 100) / 4 * closestNote + (canvas.width - 100) / 8 - ARROW_SIZE / 2;
+                    const noteY = GOAL_LINE - (initOffset + closestBeat) * BEAT_DISTANCE + ((1 - p.progress) * songDistance) - ARROW_SIZE / 2;
+                    ctx.drawImage(arrowImgs[closestNote], noteX, noteY, ARROW_SIZE, ARROW_SIZE);
+                }
+
+                requestAnimationFrame(gameLoop);
+            }
+
+            requestAnimationFrame(gameLoop);
+        </script>
+    </body>
+</html>
