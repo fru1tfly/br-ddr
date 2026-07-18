@@ -69,6 +69,9 @@ export class Song {
                         note.endAnimTimer = END_ANIM_TIME;
                     }
                     const hitQuality = note.getQuality();
+                    if(hitQuality === 0) {
+                        note.endY = GOAL_LINE;
+                    }
                     this.noteTotals[hitQuality]++;
                     this.combo++;
                     this.score += POINT_VALUES[hitQuality] * this.getMultiplier();

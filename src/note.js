@@ -111,22 +111,22 @@ export class Note {
 
     // given the current beat when a note of a given direction is hit, check if this note is in range
     inWindow(dir, beat) {
-        return this.dir === dir && this.beat > beat - 0.25 && this.beat < beat + 0.5;
+        return !this.played && this.dir === dir && Math.abs(this.yPos - GOAL_LINE) < this.song.canvasHeight / 8;
     }
 
     // 
     getQuality() {
         const dist = Math.abs(this.yPos - GOAL_LINE);
-        if (dist < this.song.canvasHeight / 50) {
+        if (dist < this.song.canvasHeight / 30) {
             // perfect
             return 0;
         } else if (dist < this.song.canvasHeight / 25) {
             // great
             return 1;
-        } else if (dist < this.song.canvasHeight / 12) {
+        } else if (dist < this.song.canvasHeight / 20) {
             // good
             return 2;
-        } else if (dist < this.song.canvasHeight / 8) {
+        } else if (dist < this.song.canvasHeight / 10) {
             // ok
             return 3;
         } else  {
